@@ -205,6 +205,7 @@ static char * ngx_http_auth_ldap_parse_url(ngx_conf_t *cf, ngx_http_auth_ldap_se
 static char * ngx_http_auth_ldap_parse_require(ngx_conf_t *cf, ngx_http_auth_ldap_server_t *server);
 static char * ngx_http_auth_ldap_parse_satisfy(ngx_conf_t *cf, ngx_http_auth_ldap_server_t *server);
 static char * ngx_http_auth_ldap_parse_referral(ngx_conf_t *cf, ngx_http_auth_ldap_server_t *server);
+static void ngx_http_auth_ldap_cleanup_urldesc(void *data);
 static void * ngx_http_auth_ldap_create_main_conf(ngx_conf_t *cf);
 static char * ngx_http_auth_ldap_init_main_conf(ngx_conf_t *cf, void *parent);
 static void * ngx_http_auth_ldap_create_loc_conf(ngx_conf_t *);
@@ -549,6 +550,15 @@ ngx_http_auth_ldap_servers(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
     return NGX_CONF_OK;
 }
 
+static void
+ngx_http_auth_ldap_cleanup_urldesc(void *data)
+{
+    LDAPURLDesc *ludpp = data;
+    if (ludpp != NULL) {
+        ldap_free_urldesc(ludpp);
+    }
+}
+
 /**
  * Parse URL conf parameter
  */
@@ -557,6 +567,7 @@ ngx_http_auth_ldap_parse_url(ngx_conf_t *cf, ngx_http_auth_ldap_server_t *server
 {
     ngx_str_t *value;
     u_char *p;
+    ngx_pool_cleanup_t *cleanup;
 
     value = cf->args->elts;
 
@@ -605,6 +616,15 @@ ngx_http_auth_ldap_parse_url(ngx_conf_t *cf, ngx_http_auth_ldap_server_t *server
         }
         return NGX_CONF_ERROR;
     }
+
+    cleanup = ngx_pool_cleanup_add(cf->pool, 0);
+    if (cleanup == NULL) {
+        ldap_free_urldesc(server->ludpp);
+        server->ludpp = NULL;
+        return NGX_CONF_ERROR;
+    }
+    cleanup->handler = ngx_http_auth_ldap_cleanup_urldesc;
+    cleanup->data = server->ludpp;
 
     if (server->ludpp->lud_attrs == NULL) {
         ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "http_auth_ldap: No user attribute specified in auth_ldap_url.");
@@ -895,6 +915,11 @@ ngx_http_auth_ldap_init_cache(ngx_cycle_t *cycle)
 
     conf = (ngx_http_auth_ldap_main_conf_t *) ngx_http_cycle_get_module_main_conf(cycle, ngx_http_auth_ldap_module);
     if (conf == NULL || !conf->cache_enabled) {
+        return NGX_OK;
+    }
+    if (conf->cache_size == 0) {
+        ngx_log_error(NGX_LOG_NOTICE, cycle->log, 0,
+            "http_auth_ldap: cache enabled but size is 0, disabling cache");
         return NGX_OK;
     }
 
@@ -1266,8 +1291,9 @@ ngx_http_auth_ldap_reply_connection(ngx_http_auth_ldap_connection_t *c, int erro
     ctx->error_code = error_code;
     if (error_msg) {
         ctx->error_msg.len = ngx_strlen(error_msg);
-        ctx->error_msg.data = ngx_palloc(ctx->r->pool, ctx->error_msg.len);
+        ctx->error_msg.data = ngx_palloc(ctx->r->pool, ctx->error_msg.len + 1);
         ngx_memcpy(ctx->error_msg.data, error_msg, ctx->error_msg.len);
+        ctx->error_msg.data[ctx->error_msg.len] = '\0';
     } else {
         ctx->error_msg.len = 0;
         ctx->error_msg.data = NULL;

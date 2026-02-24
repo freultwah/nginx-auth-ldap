@@ -224,6 +224,7 @@ static ngx_int_t ngx_http_auth_ldap_check_user(ngx_http_request_t *r, ngx_http_a
 static ngx_int_t ngx_http_auth_ldap_check_group(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *ctx);
 static ngx_int_t ngx_http_auth_ldap_check_bind(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *ctx);
 static ngx_int_t ngx_http_auth_ldap_recover_bind(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *ctx);
+static ngx_str_t ngx_http_auth_ldap_escape_filter_value(ngx_pool_t *pool, const ngx_str_t *value);
 #if (NGX_OPENSSL)
 static ngx_int_t ngx_http_auth_ldap_restore_handlers(ngx_connection_t *conn);
 #endif
@@ -976,6 +977,61 @@ ngx_http_auth_ldap_update_cache(ngx_http_auth_ldap_ctx_t *ctx,
     ngx_memcpy(oldest_elt->big_hash, ctx->cache_big_hash, 16);
 }
 
+static ngx_str_t
+ngx_http_auth_ldap_escape_filter_value(ngx_pool_t *pool, const ngx_str_t *value)
+{
+    ngx_str_t escaped;
+    size_t i;
+    size_t out_len = 0;
+
+    for (i = 0; i < value->len; i++) {
+        switch (value->data[i]) {
+            case '*':
+            case '(':
+            case ')':
+            case '\\':
+            case '\0':
+                out_len += 3;
+                break;
+            default:
+                out_len += 1;
+                break;
+        }
+    }
+
+    escaped.data = ngx_palloc(pool, out_len + 1);
+    if (escaped.data == NULL) {
+        escaped.len = 0;
+        return escaped;
+    }
+
+    u_char *p = escaped.data;
+    for (i = 0; i < value->len; i++) {
+        switch (value->data[i]) {
+            case '*':
+                *p++ = '\\'; *p++ = '2'; *p++ = 'a';
+                break;
+            case '(':
+                *p++ = '\\'; *p++ = '2'; *p++ = '8';
+                break;
+            case ')':
+                *p++ = '\\'; *p++ = '2'; *p++ = '9';
+                break;
+            case '\\':
+                *p++ = '\\'; *p++ = '5'; *p++ = 'c';
+                break;
+            case '\0':
+                *p++ = '\\'; *p++ = '0'; *p++ = '0';
+                break;
+            default:
+                *p++ = value->data[i];
+                break;
+        }
+    }
+    *p = '\0';
+    escaped.len = out_len;
+    return escaped;
+}
 
 /*** OpenLDAP SockBuf implementation over nginx socket functions ***/
 
@@ -2078,6 +2134,7 @@ ngx_http_auth_ldap_search(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *ctx)
     u_char *filter;
     char *attrs[2];
     ngx_int_t rc;
+    ngx_str_t escaped_user;
 
     /* On the first call, initiate the LDAP search operation */
     if (ctx->iteration == 0) {
@@ -2086,13 +2143,18 @@ ngx_http_auth_ldap_search(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *ctx)
         }
 
         ludpp = ctx->server->ludpp;
+        escaped_user = ngx_http_auth_ldap_escape_filter_value(r->pool, &r->headers_in.user);
+        if (escaped_user.data == NULL) {
+            return NGX_ERROR;
+        }
+
         filter = ngx_pcalloc(
             r->pool,
             (ludpp->lud_filter != NULL ? ngx_strlen(ludpp->lud_filter) : ngx_strlen("(objectClass=*)")) +
-            ngx_strlen("(&(=))") + ngx_strlen(ludpp->lud_attrs[0]) + r->headers_in.user.len + 1);
+            ngx_strlen("(&(=))") + ngx_strlen(ludpp->lud_attrs[0]) + escaped_user.len + 1);
         ngx_sprintf(filter, "(&%s(%s=%V))%Z",
                 ludpp->lud_filter != NULL ? ludpp->lud_filter : "(objectClass=*)",
-                ludpp->lud_attrs[0], &r->headers_in.user);
+                ludpp->lud_attrs[0], &escaped_user);
         ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "http_auth_ldap: Search filter is \"%s\"",
             (const char *) filter);
 

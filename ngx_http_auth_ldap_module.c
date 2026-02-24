@@ -2233,38 +2233,24 @@ ngx_http_auth_ldap_check_group(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *
 {
     ngx_http_complex_value_t *values;
     ngx_int_t rc;
-    u_char *filter;
-    char *user_val;
-    char *attrs[2];
-    size_t for_filter;
+    struct berval user_val;
 
-    /* Handle result of the search started during previous call */
+    /* Handle result of the compare started during previous call */
     if (ctx->iteration > 0) {
-        ctx->group_dn.data = ctx->dn.data;
-        if (ctx->group_dn.data == NULL) {
-            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "http_auth_ldap: ldap_search_ext() returned NULL result");
+        if (ctx->error_code == LDAP_COMPARE_TRUE) {
+            if (ctx->server->satisfy_all == 0) {
+                ctx->outcome = OUTCOME_ALLOW;
+                return NGX_OK;
+            }
+        } else if (ctx->error_code == LDAP_COMPARE_FALSE) {
             if (ctx->server->satisfy_all == 1) {
                 ctx->outcome = OUTCOME_DENY;
                 return NGX_DECLINED;
             }
         } else {
-            if (ctx->error_code == LDAP_SUCCESS) {
-                if (ctx->server->satisfy_all == 0) {
-                    ctx->outcome = OUTCOME_ALLOW;
-                    return NGX_OK;
-                }
-            } else if (ctx->error_code == LDAP_NO_RESULTS_RETURNED) {
-                ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "http_auth_ldap: ldap_search_ext() request failed (%d: %s)",
-                              ctx->error_code, ldap_err2string(ctx->error_code));
-                if (ctx->server->satisfy_all == 1) {
-                    ctx->outcome = OUTCOME_DENY;
-                    return NGX_DECLINED;
-                }
-            } else {
-                ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "http_auth_ldap: ldap_search_ext() request failed (%d: %s)",
-                    ctx->error_code, ldap_err2string(ctx->error_code));
-                return NGX_ERROR;
-            }
+            ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "http_auth_ldap: ldap_compare_ext() request failed (%d: %s)",
+                ctx->error_code, ldap_err2string(ctx->error_code));
+            return NGX_ERROR;
         }
     }
 
@@ -2287,64 +2273,50 @@ ngx_http_auth_ldap_check_group(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *
         return NGX_ERROR;
     }
 
-    char *gr;
-    char *cn_gr;
-    char *tail_gr;
-    gr = ngx_pcalloc(r->pool,val.len+1);
-    ngx_memcpy(gr, val.data, val.len);
-    gr[val.len] = '\0';
-    tail_gr = ngx_strchr(gr, ',');
-    if (tail_gr == NULL) {
-        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "http_auth_ldap: Incorrect group DN: \"%s\"", gr);
+    ngx_str_t group_dn;
+    ngx_str_t user_val_str;
+
+    group_dn.data = ngx_palloc(r->pool, val.len + 1);
+    if (group_dn.data == NULL) {
         ctx->outcome = OUTCOME_ERROR;
         ngx_http_auth_ldap_return_connection(ctx->c);
         return NGX_ERROR;
     }
-    *tail_gr = '\0';
-    tail_gr++;
-    cn_gr = gr;
+    ngx_memcpy(group_dn.data, val.data, val.len);
+    group_dn.data[val.len] = '\0';
+    group_dn.len = val.len;
 
     if (ctx->server->group_attribute_dn == 1) {
-        user_val = ngx_pcalloc(
-            r->pool,
-            ctx->user_dn.len + 1);
-        ngx_memcpy(user_val, ctx->user_dn.data, ctx->user_dn.len);
-        user_val[ctx->user_dn.len] = '\0';
+        user_val_str = ctx->user_dn;
     } else {
-        user_val = ngx_pcalloc(
-            r->pool,
-            r->headers_in.user.len + 1);
-        ngx_memcpy(user_val, r->headers_in.user.data, r->headers_in.user.len);
-        user_val[r->headers_in.user.len] = '\0';
+        user_val_str = r->headers_in.user;
     }
+
+    user_val.bv_val = (char *) user_val_str.data;
+    user_val.bv_len = user_val_str.len;
 
     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "http_auth_ldap: Search user in group \"%V\"", &val);
 
     if (ctx->server->group_attribute.data == NULL) {
-        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "http_auth_ldap: group_attribute.data is \"%V\" so calling a failure here", ctx->server->group_attribute.data);
+        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+            "http_auth_ldap: group_attribute.data is \"%V\" so calling a failure here",
+            &ctx->server->group_attribute);
         rc = !LDAP_SUCCESS;
     } else {
-        for_filter = ngx_strlen(cn_gr) + ctx->server->group_attribute.len + ngx_strlen((const char *) user_val) + ngx_strlen("(&()(=))") + 1;
-        filter = ngx_pcalloc(
-            r->pool,
-            for_filter);
-        ngx_sprintf(filter, "(&(%s)(%s=%s))", cn_gr, ctx->server->group_attribute.data, user_val);
-        ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "http_auth_ldap: Search group filter is \"%s\"", (const char *) filter);
-        attrs[0] = LDAP_NO_ATTRS;
-        attrs[1] = NULL;
-        rc = ldap_search_ext(ctx->c->ld, tail_gr, LDAP_SCOPE_ONELEVEL, (const char *) filter, attrs, 0, NULL, NULL, NULL, 0, &ctx->c->msgid);
+        rc = ldap_compare_ext(ctx->c->ld, (const char *) group_dn.data,
+            (const char *) ctx->server->group_attribute.data, &user_val, NULL, NULL, &ctx->c->msgid);
     }
     if (rc != LDAP_SUCCESS) {
-        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "http_auth_ldap: ldap_search_ext() failed (%d: %s)",
+        ngx_log_error(NGX_LOG_ERR, r->connection->log, 0, "http_auth_ldap: ldap_compare_ext() failed (%d: %s)",
             rc, ldap_err2string(rc));
         ctx->outcome = OUTCOME_ERROR;
         ngx_http_auth_ldap_return_connection(ctx->c);
         return NGX_ERROR;
     }
 
-    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "http_auth_ldap: ldap_search_ext() -> msgid=%d",
+    ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "http_auth_ldap: ldap_compare_ext() -> msgid=%d",
         ctx->c->msgid);
-    ctx->c->state = STATE_SEARCHING;
+    ctx->c->state = STATE_COMPARING;
     ctx->iteration++;
     return NGX_AGAIN;
 }

@@ -31,7 +31,9 @@
 #include <ngx_http.h>
 #include <ngx_md5.h>
 #include <ldap.h>
+#include <netinet/in.h>
 #include <openssl/opensslv.h>
+#include <openssl/x509v3.h>
 
 // used for manual warnings
 #define XSTR(x) STR(x)
@@ -1333,36 +1335,49 @@ ngx_http_auth_ldap_ssl_handshake_handler(ngx_connection_t *conn, ngx_flag_t vali
           X509 *cert = SSL_get_peer_certificate(conn->ssl->connection);
           long chain_verified = SSL_get_verify_result(conn->ssl->connection);
 
+          if (cert == NULL) {
+            ngx_log_error(NGX_LOG_ERR, c->log, 0,
+              "http_auth_ldap: Remote side presented no SSL certificate");
+            ngx_http_auth_ldap_close_connection(c);
+            return;
+          }
+
           int addr_verified;
           char *hostname = c->server->ludpp->lud_host;
           addr_verified = X509_check_host(cert, hostname, 0, 0, 0);
 
           if (!addr_verified) { // domain not in cert? try IP
-            size_t len; // get IP length
-            if (conn->sockaddr->sa_family == 4) len = 4;
-            else if (conn->sockaddr->sa_family == 6) len = 16;
-            else { // very unlikely indeed
+            if (conn->sockaddr->sa_family == AF_INET) {
+              struct sockaddr_in *sin = (struct sockaddr_in *) conn->sockaddr;
+              addr_verified = X509_check_ip(cert, (const unsigned char *) &sin->sin_addr,
+                sizeof(sin->sin_addr), 0);
+            } else if (conn->sockaddr->sa_family == AF_INET6) {
+              struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *) conn->sockaddr;
+              addr_verified = X509_check_ip(cert, (const unsigned char *) &sin6->sin6_addr,
+                sizeof(sin6->sin6_addr), 0);
+            } else { // very unlikely indeed
+              X509_free(cert);
               ngx_http_auth_ldap_close_connection(c);
               return;
             }
-            addr_verified = X509_check_ip(cert, (const unsigned char*)conn->sockaddr->sa_data, len, 0);
           }
 
           // Find anything fishy?
-          if ( !(cert && addr_verified && chain_verified == X509_V_OK) ) {
+          if ( !(addr_verified && chain_verified == X509_V_OK) ) {
             if (!addr_verified) {
               ngx_log_error(NGX_LOG_ERR, c->log, 0,
                 "http_auth_ldap: Remote side presented invalid SSL certificate: "
                 "does not match address (neither server's domain nor IP in certificate's CN or SAN)");
-                fprintf(stderr, "DEBUG: SSL cert domain mismatch\n"); fflush(stderr);
             } else {
               ngx_log_error(NGX_LOG_ERR, c->log, 0,
                 "http_auth_ldap: Remote side presented invalid SSL certificate: error %l, %s",
                 chain_verified, X509_verify_cert_error_string(chain_verified));
             }
+            X509_free(cert);
             ngx_http_auth_ldap_close_connection(c);
             return;
           }
+          X509_free(cert);
         }
         #endif
 

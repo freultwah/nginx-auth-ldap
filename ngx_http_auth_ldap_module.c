@@ -87,6 +87,7 @@ typedef struct {
     ngx_flag_t ssl_check_cert;
     ngx_str_t ssl_ca_dir;
     ngx_str_t ssl_ca_file;
+    ngx_flag_t ssl_ca_loaded;
 
     ngx_array_t *require_group;     /* array of ngx_http_complex_value_t */
     ngx_array_t *require_user;      /* array of ngx_http_complex_value_t */
@@ -1427,9 +1428,11 @@ ngx_http_auth_ldap_ssl_handshake_handler(ngx_connection_t *conn, ngx_flag_t vali
 
           int addr_verified;
           char *hostname = c->server->ludpp->lud_host;
-          addr_verified = X509_check_host(cert, hostname, 0, 0, 0);
+          /* X509_check_host()/X509_check_ip() return 1 on match, 0 on
+           * no match and -1 on error; only 1 is acceptable. */
+          addr_verified = X509_check_host(cert, hostname, 0, 0, NULL);
 
-          if (!addr_verified) { // domain not in cert? try IP
+          if (addr_verified != 1) { // domain not in cert? try IP
             if (conn->sockaddr->sa_family == AF_INET) {
               struct sockaddr_in *sin = (struct sockaddr_in *) conn->sockaddr;
               addr_verified = X509_check_ip(cert, (const unsigned char *) &sin->sin_addr,
@@ -1504,8 +1507,16 @@ ngx_http_auth_ldap_ssl_handshake(ngx_http_auth_ldap_connection_t *c)
 
     ngx_http_auth_ldap_ssl_callback callback;
     if (c->server->ssl_check_cert) {
-      // load CA certificates: custom ones if specified, default ones instead
-      if (c->server->ssl_ca_file.data || c->server->ssl_ca_dir.data) {
+      if (!c->server->ssl_ca_loaded) {
+        /*
+         * Load the CA locations once per worker; reloading them on every
+         * handshake would keep adding certificates to the shared SSL_CTX
+         * store and leak memory on repeated reconnects.
+         */
+        c->server->ssl_ca_loaded = 1;
+
+        // load CA certificates: custom ones if specified, default ones instead
+        if (c->server->ssl_ca_file.data || c->server->ssl_ca_dir.data) {
 #if (OPENSSL_VERSION_NUMBER >= 0x10100000L)
         int setcode = SSL_CTX_load_verify_locations(transport->ssl->session_ctx,
           (char*)(c->server->ssl_ca_file.data), (char*)(c->server->ssl_ca_dir.data));
@@ -1520,19 +1531,29 @@ ngx_http_auth_ldap_ssl_handshake(ngx_http_auth_ldap_connection_t *c)
             "http_auth_ldap: SSL initialization failed. Could not set custom CA certificate location. "
             "Error: %lu, %s", error_code, error_msg);
         }
-      }
+        }
 #if (OPENSSL_VERSION_NUMBER >= 0x10100000L)
-      int setcode = SSL_CTX_set_default_verify_paths(transport->ssl->session_ctx);
+        int setcode = SSL_CTX_set_default_verify_paths(transport->ssl->session_ctx);
 #else
-      int setcode = SSL_CTX_set_default_verify_paths(transport->ssl->connection->ctx);
+        int setcode = SSL_CTX_set_default_verify_paths(transport->ssl->connection->ctx);
 #endif
-      if (setcode != 1) {
-        unsigned long error_code = ERR_get_error();
-        char *error_msg = ERR_error_string(error_code, NULL);
-        ngx_log_error(NGX_LOG_ERR, c->log, 0,
-          "http_auth_ldap: SSL initialization failed. Could not use default CA certificate location. "
-          "Error: %lu, %s", error_code, error_msg);
+        if (setcode != 1) {
+          unsigned long error_code = ERR_get_error();
+          char *error_msg = ERR_error_string(error_code, NULL);
+          ngx_log_error(NGX_LOG_ERR, c->log, 0,
+            "http_auth_ldap: SSL initialization failed. Could not use default CA certificate location. "
+            "Error: %lu, %s", error_code, error_msg);
+        }
       }
+
+      /*
+       * The SSL context defaults to SSL_VERIFY_NONE, in which case
+       * SSL_get_verify_result() is always X509_V_OK and the chain check
+       * in the handshake handler would be vacuous. Require the peer
+       * certificate on this connection so the chain is actually
+       * validated.
+       */
+      SSL_set_verify(transport->ssl->connection, SSL_VERIFY_PEER, NULL);
 
       // use validating version of next function
       callback = &ngx_http_auth_ldap_ssl_handshake_validating_handler;

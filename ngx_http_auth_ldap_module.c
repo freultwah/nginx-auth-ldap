@@ -214,6 +214,7 @@ static ngx_int_t ngx_http_auth_ldap_init_worker(ngx_cycle_t *cycle);
 static ngx_int_t ngx_http_auth_ldap_init(ngx_conf_t *cf);
 static ngx_int_t ngx_http_auth_ldap_init_cache(ngx_cycle_t *cycle);
 static void ngx_http_auth_ldap_close_connection(ngx_http_auth_ldap_connection_t *c);
+static void ngx_http_auth_ldap_request_cleanup(void *data);
 static void ngx_http_auth_ldap_read_handler(ngx_event_t *rev);
 static void ngx_http_auth_ldap_reconnect_handler(ngx_event_t *);
 static ngx_int_t ngx_http_auth_ldap_init_connections(ngx_cycle_t *cycle);
@@ -1884,6 +1885,25 @@ ngx_http_auth_ldap_set_realm(ngx_http_request_t *r, ngx_str_t *realm)
     return NGX_HTTP_UNAUTHORIZED;
 }
 
+/*
+ * Runs when the request pool is destroyed (e.g. the client went away).
+ * Returns the held LDAP connection, if any, and unlinks the request from
+ * the server's waiting queue so no dangling pointer is left behind.
+ */
+static void
+ngx_http_auth_ldap_request_cleanup(void *data)
+{
+    ngx_http_auth_ldap_ctx_t *ctx = data;
+
+    if (ctx->c != NULL) {
+        ngx_http_auth_ldap_return_connection(ctx->c);
+    }
+
+    if (ngx_queue_next(&ctx->queue)) {
+        ngx_queue_remove(&ctx->queue);
+    }
+}
+
 /**
  * LDAP Authentication handler
  */
@@ -1892,6 +1912,7 @@ ngx_http_auth_ldap_handler(ngx_http_request_t *r)
 {
     ngx_http_auth_ldap_loc_conf_t *alcf;
     ngx_http_auth_ldap_ctx_t *ctx;
+    ngx_pool_cleanup_t *cleanup;
     int rc;
 
     alcf = ngx_http_get_module_loc_conf(r, ngx_http_auth_ldap_module);
@@ -1931,6 +1952,18 @@ ngx_http_auth_ldap_handler(ngx_http_request_t *r)
         ctx->r = r;
         /* Other fields have been initialized to zero/NULL */
         ngx_http_set_ctx(r, ctx, ngx_http_auth_ldap_module);
+
+        /*
+         * Make sure the LDAP connection (if any) is returned and the
+         * request is unlinked from the waiting queue when the request
+         * is finalized, e.g. when the client goes away mid-authentication.
+         */
+        cleanup = ngx_pool_cleanup_add(r->pool, 0);
+        if (cleanup == NULL) {
+            return NGX_HTTP_INTERNAL_SERVER_ERROR;
+        }
+        cleanup->handler = ngx_http_auth_ldap_request_cleanup;
+        cleanup->data = ctx;
     }
 
     return ngx_http_auth_ldap_authenticate(r, ctx, alcf);

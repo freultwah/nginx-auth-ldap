@@ -2194,6 +2194,15 @@ ngx_http_auth_ldap_authenticate(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t 
 
                 if (ngx_http_auth_ldap_cache.buckets != NULL &&
                     (ctx->outcome == OUTCOME_DENY || ctx->outcome == OUTCOME_ALLOW)) {
+                    /*
+                     * The cache probe in PHASE_START walked all servers
+                     * and left the hash fields describing the last one
+                     * in the list, not the server that produced this
+                     * outcome. Recompute them for the current server so
+                     * the entry is stored (and later found) under the
+                     * right key.
+                     */
+                    (void) ngx_http_auth_ldap_check_cache(r, ctx, &ngx_http_auth_ldap_cache, ctx->server);
                     ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "http_auth_ldap: Caching outcome %d", ctx->outcome);
                     ngx_http_auth_ldap_update_cache(ctx, &ngx_http_auth_ldap_cache, ctx->outcome);
                 }

@@ -2373,7 +2373,11 @@ ngx_http_auth_ldap_check_user(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *c
         }
 
         ngx_log_debug1(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "http_auth_ldap: Comparing user DN with \"%V\"", &val);
-        if (val.len == ctx->user_dn.len && ngx_memcmp(val.data, ctx->user_dn.data, val.len) == 0) {
+        /*
+         * DN attribute names and keywords are case-insensitive
+         * (RFC 4514), so compare case-insensitively.
+         */
+        if (val.len == ctx->user_dn.len && ngx_strncasecmp(val.data, ctx->user_dn.data, val.len) == 0) {
             if (ctx->server->satisfy_all == 0) {
                 ctx->outcome = OUTCOME_ALLOW;
                 return NGX_OK;

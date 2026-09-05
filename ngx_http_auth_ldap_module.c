@@ -489,6 +489,9 @@ ngx_http_auth_ldap_ldap_server(ngx_conf_t *cf, ngx_command_t *dummy, void *conf)
             "http_auth_ldap: Unknown directive \"%V\" in ldap_server block", &value[0]);
         return NGX_CONF_ERROR;
     }
+
+    /* The CONF_MSEC_VALUE branches fall through here on success. */
+    return NGX_CONF_OK;
 }
 
 /**
@@ -1171,11 +1174,13 @@ ngx_http_auth_ldap_sb_read(Sockbuf_IO_Desc *sbiod, void *buf, ber_len_t len)
 
     ret = c->conn.connection->recv(c->conn.connection, buf, len);
     if (ret < 0) {
+        /*
+         * Map NGX_AGAIN to EAGAIN so OpenLDAP retries the read; for
+         * hard errors keep whatever errno the recv implementation left
+         * behind instead of assuming ECONNRESET.
+         */
         if (ret == NGX_AGAIN) {
             errno = NGX_EAGAIN;
-        } else if (c->conn.connection->recv_errno) {
-            /* keep the real error instead of assuming ECONNRESET */
-            errno = c->conn.connection->recv_errno;
         }
         return -1;
     }

@@ -418,7 +418,6 @@ if (ngx_strcmp(value[0].data, #x) == 0) { \
 static char *
 ngx_http_auth_ldap_ldap_server(ngx_conf_t *cf, ngx_command_t *dummy, void *conf)
 {
-    char                           *rv;
     ngx_str_t                      *value;
     ngx_http_auth_ldap_server_t    *server;
     ngx_http_auth_ldap_main_conf_t *cnf = conf;
@@ -448,8 +447,8 @@ ngx_http_auth_ldap_ldap_server(ngx_conf_t *cf, ngx_command_t *dummy, void *conf)
         return ngx_http_auth_ldap_parse_referral(cf, server);
     } else if (ngx_strcmp(value[0].data, "max_down_retries") == 0) {
         i = ngx_atoi(value[1].data, value[1].len);
-        if (i == NGX_ERROR) {
-            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "http_auth_ldap: 'max_down_retries' value must be an integer: using default of 0");
+        if (i == NGX_ERROR || i < 0) {
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0, "http_auth_ldap: 'max_down_retries' value must be a non-negative integer: using default of 0");
             i = 0;
         }
         server->max_down_retries = i;
@@ -484,10 +483,11 @@ ngx_http_auth_ldap_ldap_server(ngx_conf_t *cf, ngx_command_t *dummy, void *conf)
     else if (ngx_strcmp(value[0].data, "include") == 0) {
         return ngx_conf_include(cf, dummy, conf);
     }
-
-    rv = NGX_CONF_OK;
-
-    return rv;
+    else {
+        ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+            "http_auth_ldap: Unknown directive \"%V\" in ldap_server block", &value[0]);
+        return NGX_CONF_ERROR;
+    }
 }
 
 /**
@@ -713,7 +713,9 @@ ngx_http_auth_ldap_parse_require(ngx_conf_t *cf, ngx_http_auth_ldap_server_t *se
             return NGX_CONF_OK;
         }
         if (server->require_valid_user_dn.value.data != NULL) {
-            return "is duplicate";
+            ngx_conf_log_error(NGX_LOG_EMERG, cf, 0,
+                "http_auth_ldap: \"require valid_user\" is already defined for this server");
+            return NGX_CONF_ERROR;
         }
         target = &server->require_valid_user_dn;
     } else if (ngx_strcmp(value[1].data, "user") == 0) {

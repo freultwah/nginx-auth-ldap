@@ -180,6 +180,7 @@ typedef struct {
     int error_code;
     ngx_str_t error_msg;
     ngx_str_t dn;
+    ngx_flag_t dn_warned;
     ngx_str_t user_dn;
     ngx_str_t group_dn;
 
@@ -255,7 +256,7 @@ static ngx_str_t ngx_http_auth_ldap_escape_filter_value(ngx_pool_t *pool, const 
 static ngx_int_t ngx_http_auth_ldap_restore_handlers(ngx_connection_t *conn);
 #endif
 
-ngx_http_auth_ldap_cache_t ngx_http_auth_ldap_cache;
+static ngx_http_auth_ldap_cache_t ngx_http_auth_ldap_cache;
 
 static ngx_command_t ngx_http_auth_ldap_commands[] = {
     {
@@ -1170,7 +1171,12 @@ ngx_http_auth_ldap_sb_read(Sockbuf_IO_Desc *sbiod, void *buf, ber_len_t len)
 
     ret = c->conn.connection->recv(c->conn.connection, buf, len);
     if (ret < 0) {
-        errno = (ret == NGX_AGAIN) ? NGX_EAGAIN : NGX_ECONNRESET;
+        if (ret == NGX_AGAIN) {
+            errno = NGX_EAGAIN;
+        } else if (c->conn.connection->recv_errno) {
+            /* keep the real error instead of assuming ECONNRESET */
+            errno = c->conn.connection->recv_errno;
+        }
         return -1;
     }
 
@@ -1775,6 +1781,17 @@ ngx_http_auth_ldap_read_handler(ngx_event_t *rev)
                             ngx_memcpy(c->rctx->dn.data, dn, c->rctx->dn.len + 1);
                             ldap_memfree(dn);
                         }
+                    } else if (!c->rctx->dn_warned) {
+                        /*
+                         * The first match is used silently; warn once
+                         * that the search is ambiguous.
+                         */
+                        c->rctx->dn_warned = 1;
+                        ngx_log_error(NGX_LOG_WARN, c->log, 0,
+                            "http_auth_ldap: Multiple entries match the search filter, "
+                            "using the first one (\"%V\"); tighten the filter in the "
+                            "ldap_server url to make the match unambiguous",
+                            &c->rctx->dn);
                     }
                 } else if (ldap_msgtype(result) == LDAP_RES_SEARCH_RESULT) {
                     ngx_log_debug3(NGX_LOG_DEBUG_HTTP, c->log, 0, "http_auth_ldap: Received search result (%d: %s [%s])",

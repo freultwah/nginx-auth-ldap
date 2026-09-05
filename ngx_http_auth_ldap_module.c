@@ -217,6 +217,7 @@ typedef struct ngx_http_auth_ldap_connection {
     LDAP* ld;
     ngx_http_auth_ldap_connection_state_t state;
     int msgid;
+    ngx_flag_t closing;
 } ngx_http_auth_ldap_connection_t;
 
 static char * ngx_http_auth_ldap_ldap_server_block(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
@@ -1119,9 +1120,18 @@ ngx_http_auth_ldap_sb_close(Sockbuf_IO_Desc *sbiod)
 
     ngx_log_debug0(NGX_LOG_DEBUG_HTTP, c->log, 0, "ngx_http_auth_ldap_sb_close()");
 
+    if (c->closing) {
+        /*
+         * Re-entered through close_connection() -> ldap_unbind_ext() ->
+         * sockbuf teardown; the socket is being torn down already.
+         */
+        return 0;
+    }
+
     if (!c->conn.connection->read->error && !c->conn.connection->read->eof) {
         if (ngx_shutdown_socket(c->conn.connection->fd, SHUT_RDWR) == -1) {
             ngx_connection_error(c->conn.connection, ngx_socket_errno, ngx_shutdown_socket_n " failed");
+            c->closing = 1;
             ngx_http_auth_ldap_close_connection(c);
             return -1;
         }
@@ -1836,6 +1846,7 @@ ngx_http_auth_ldap_connect(ngx_http_auth_ldap_connection_t *c)
 
     c->server->max_down_retries_count = 0;   /* reset retries count */
     c->state = STATE_CONNECTING;
+    c->closing = 0;
 }
 
 static void

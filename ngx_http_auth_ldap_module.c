@@ -1126,20 +1126,20 @@ ngx_http_auth_ldap_sb_close(Sockbuf_IO_Desc *sbiod)
 
     ngx_log_debug0(NGX_LOG_DEBUG_HTTP, c->log, 0, "ngx_http_auth_ldap_sb_close()");
 
-    if (c->closing) {
+    if (!c->closing && c->conn.connection &&
+        !c->conn.connection->read->error && !c->conn.connection->read->eof) {
         /*
-         * Re-entered through close_connection() -> ldap_unbind_ext() ->
-         * sockbuf teardown; the socket is being torn down already.
+         * Graceful shutdown on the way out. We must not call
+         * close_connection() from here: this callback runs inside
+         * ldap_unbind_ext() when we are tearing the connection down
+         * ourselves, and re-entering close_connection() would attempt
+         * a second unbind of the same handle and deadlock in
+         * OpenLDAP's connection lock. The socket is closed by
+         * close_connection() (or by the read event seeing EOF)
+         * regardless.
          */
-        return 0;
-    }
-
-    if (!c->conn.connection->read->error && !c->conn.connection->read->eof) {
         if (ngx_shutdown_socket(c->conn.connection->fd, SHUT_RDWR) == -1) {
             ngx_connection_error(c->conn.connection, ngx_socket_errno, ngx_shutdown_socket_n " failed");
-            c->closing = 1;
-            ngx_http_auth_ldap_close_connection(c);
-            return -1;
         }
     }
 
@@ -1222,6 +1222,17 @@ static void
 ngx_http_auth_ldap_close_connection(ngx_http_auth_ldap_connection_t *c)
 {
     ngx_queue_t *q;
+
+    if (c->closing) {
+        /*
+         * Re-entered through ldap_unbind_ext() -> sockbuf teardown.
+         * The outer call is still on the stack and holds OpenLDAP's
+         * connection lock; doing anything else here (in particular a
+         * second ldap_unbind_ext() on the same handle) deadlocks.
+         */
+        return;
+    }
+    c->closing = 1;
 
     if (c->ld) {
         ngx_log_debug1(NGX_LOG_DEBUG_HTTP, c->log, 0, "http_auth_ldap: Unbinding from the server \"%V\")",

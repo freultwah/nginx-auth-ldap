@@ -62,6 +62,25 @@
 extern int ldap_init_fd(ber_socket_t fd, int proto, const char *url, LDAP **ld);
 #endif
 
+/*
+ * The value parameter of ldap_compare_ext() is "struct berval *" in
+ * OpenLDAP >= 2.4.42 (and in the Apple SDK); older releases declare
+ * "const char *". This module requires the berval form. Where the
+ * compiler allows it, fail the build with a diagnostic (negative array
+ * size) instead of an obscure incompatible-pointer error if the
+ * installed headers declare the old form. Define
+ * NGX_LDAP_ASSUME_COMPARE_EXT_BERVAL to skip the check on unusual
+ * platforms.
+ */
+#if !defined(__APPLE__) && !defined(NGX_LDAP_ASSUME_COMPARE_EXT_BERVAL) \
+    && (defined(__GNUC__) || defined(__clang__))
+typedef int ngx_ldap_compare_ext_fn(LDAP *, const char *, const char *,
+    struct berval *, const LDAPControl *, const LDAPControl *, int *);
+typedef char ngx_ldap_compare_ext_api_check[
+    __builtin_types_compatible_p(typeof(ldap_compare_ext), ngx_ldap_compare_ext_fn)
+        ? 1 : -1];
+#endif
+
 #define OUTCOME_ERROR          -1 /* Some error occurred in the process */
 #define OUTCOME_DENY            0
 #define OUTCOME_ALLOW           1

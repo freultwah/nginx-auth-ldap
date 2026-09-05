@@ -29,6 +29,12 @@ in nginx source folder
 make install
 ```
 
+Note: on Linux the module requires OpenLDAP >= 2.4.42 (the `ldap_compare_ext()`
+API with `berval` values). With older releases the build fails with a
+"negative array size" error in `ngx_ldap_compare_ext_api_check`. If your
+headers declare a `berval`-compatible signature that the compile-time check
+does not recognize, define `NGX_LDAP_ASSUME_COMPARE_EXT_BERVAL` to skip it.
+
 # Example configuration
 Define list of your LDAP servers with required user/group requirements:
 

@@ -2169,7 +2169,7 @@ ngx_http_auth_ldap_authenticate(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t 
                 /* Check cache if enabled */
                 if (ngx_http_auth_ldap_cache.buckets != NULL) {
                     for (i = 0; i < conf->servers->nelts; i++) {
-                        s = &((ngx_http_auth_ldap_server_t *) conf->servers->elts)[i];
+                        s = ((ngx_http_auth_ldap_server_t **) conf->servers->elts)[i];
                         rc = ngx_http_auth_ldap_check_cache(r, ctx, &ngx_http_auth_ldap_cache, s);
                         ngx_log_debug2(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, "http_auth_ldap: Using cached outcome %d from server %d", rc, i);
                         if (rc == OUTCOME_DENY || rc == OUTCOME_ALLOW) {
@@ -2372,10 +2372,11 @@ ngx_http_auth_ldap_search(ngx_http_request_t *r, ngx_http_auth_ldap_ctx_t *ctx)
             (const char *) filter);
 
         /*
-         * Only the entry DN is needed; an empty attribute list (RFC 4511)
-         * asks the server to return no attributes at all.
+         * Only the entry DN is needed. Request "1.1" (RFC 4511) to omit
+         * attributes; an empty attribute list requests all user attributes.
          */
-        attrs[0] = NULL;
+        attrs[0] = LDAP_NO_ATTRS;
+        attrs[1] = NULL;
 
         rc = ldap_search_ext(ctx->c->ld, ludpp->lud_dn, ludpp->lud_scope, (const char *) filter, attrs, 0, NULL, NULL, NULL, 0, &ctx->c->msgid);
         if (rc != LDAP_SUCCESS) {
